@@ -377,6 +377,9 @@ func (*antigravityProviderBridge) ClassifyError(
 	case status == http.StatusTooManyRequests && strings.EqualFold(codeValue, "INSUFFICIENT_G1_CREDITS_BALANCE"):
 		evidence.Hint = execution.FailureHintRateLimited
 		evidence.ReplaySafety = execution.ReplaySafetyRejectedBeforeProcessing
+	case antigravityModelCapacityError(status, typeValue, codeValue):
+		evidence.Hint = execution.FailureHintRateLimited
+		evidence.ReplaySafety = execution.ReplaySafetyRejectedBeforeProcessing
 	case requestScopedFailure(err):
 		evidence.Hint = execution.FailureHintRequestRejected
 	case status == http.StatusTooManyRequests:
@@ -385,10 +388,19 @@ func (*antigravityProviderBridge) ClassifyError(
 		evidence.Hint = execution.FailureHintHostError
 	}
 	annotateProviderErrorEvidence(evidence, err)
-	if status == http.StatusTooManyRequests && strings.EqualFold(codeValue, "INSUFFICIENT_G1_CREDITS_BALANCE") {
+	if (status == http.StatusTooManyRequests && strings.EqualFold(codeValue, "INSUFFICIENT_G1_CREDITS_BALANCE")) ||
+		antigravityModelCapacityError(status, typeValue, codeValue) {
 		evidence.ScopeHint = execution.ErrorScopeCredential
 	}
 	return status, evidence
+}
+
+func antigravityModelCapacityError(status int, typeValue, codeValue string) bool {
+	if status != http.StatusServiceUnavailable && status != http.StatusTooManyRequests {
+		return false
+	}
+	return strings.EqualFold(codeValue, "MODEL_CAPACITY_EXHAUSTED") ||
+		strings.EqualFold(typeValue, "MODEL_CAPACITY_EXHAUSTED")
 }
 
 func antigravityProviderErrorSummary(status int, typeValue, codeValue string) string {
@@ -399,6 +411,8 @@ func antigravityProviderErrorSummary(status int, typeValue, codeValue string) st
 		return "Antigravity access was denied"
 	case status == http.StatusTooManyRequests && strings.EqualFold(codeValue, "INSUFFICIENT_G1_CREDITS_BALANCE"):
 		return "Antigravity Google One AI credits are unavailable"
+	case antigravityModelCapacityError(status, typeValue, codeValue):
+		return "Antigravity model capacity was exhausted"
 	case status == http.StatusTooManyRequests:
 		return "Antigravity upstream rate limit was reached"
 	case status >= http.StatusInternalServerError:

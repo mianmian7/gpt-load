@@ -300,6 +300,26 @@ func TestAntigravityProviderClassifiesOAuthAndPaidCreditErrors(t *testing.T) {
 			wantHint: execution.FailureHintRateLimited, wantReplay: execution.ReplaySafetyRejectedBeforeProcessing, wantScope: execution.ErrorScopeCredential,
 		},
 		{
+			name: "503 MODEL_CAPACITY_EXHAUSTED code-only advances to another credential with replay safety",
+			err: antigravityClassifiedTestError{status: 503, code: "MODEL_CAPACITY_EXHAUSTED"},
+			wantHint: execution.FailureHintRateLimited, wantReplay: execution.ReplaySafetyRejectedBeforeProcessing, wantScope: execution.ErrorScopeCredential,
+		},
+		{
+			name: "503 MODEL_CAPACITY_EXHAUSTED type-only advances to another credential with replay safety",
+			err: antigravityClassifiedTestError{status: 503, typeID: "MODEL_CAPACITY_EXHAUSTED"},
+			wantHint: execution.FailureHintRateLimited, wantReplay: execution.ReplaySafetyRejectedBeforeProcessing, wantScope: execution.ErrorScopeCredential,
+		},
+		{
+			name: "429 MODEL_CAPACITY_EXHAUSTED advances to another credential with replay safety",
+			err: antigravityClassifiedTestError{status: 429, typeID: "RESOURCE_EXHAUSTED", code: "MODEL_CAPACITY_EXHAUSTED"},
+			wantHint: execution.FailureHintRateLimited, wantReplay: execution.ReplaySafetyRejectedBeforeProcessing, wantScope: execution.ErrorScopeCredential,
+		},
+		{
+			name: "503 ordinary host error preserves host error without replay safety",
+			err: antigravityClassifiedTestError{status: 503, typeID: "INTERNAL", code: "INTERNAL"},
+			wantHint: execution.FailureHintHostError, wantScope: execution.ErrorScopeGroup,
+		},
+		{
 			name: "rate limit retains fractional retry delay", err: antigravityRetryAfterTestError{
 				antigravityClassifiedTestError: antigravityClassifiedTestError{status: 429, typeID: "RESOURCE_EXHAUSTED", code: "RATE_LIMIT_EXCEEDED"},
 				retryAfter:                     450 * time.Millisecond,

@@ -343,6 +343,27 @@ func TestJudgeExecutionUsesNeutralEvidenceAndReplayBoundary(t *testing.T) {
 			},
 		},
 		{
+			name: "503 model capacity exhausted cools credential and retries next candidate",
+			attempt: ExecutionAttempt{
+				DispatchState: execution.DispatchMaybeSent,
+				StatusCode:    http.StatusServiceUnavailable,
+				Now:           now,
+				Evidence: &execution.ErrorEvidence{
+					Kind:         execution.ErrorKindHTTP,
+					StatusCode:   http.StatusServiceUnavailable,
+					Hint:         execution.FailureHintRateLimited,
+					ScopeHint:    execution.ErrorScopeCredential,
+					Code:         "MODEL_CAPACITY_EXHAUSTED",
+					Summary:      "Antigravity model capacity was exhausted",
+					ReplaySafety: execution.ReplaySafetyRejectedBeforeProcessing,
+				},
+			},
+			want: Result{
+				Category: FailureCategoryRateLimited, Action: ActionCooldownCredential,
+				CooldownUntil: now.Add(time.Minute),
+			},
+		},
+		{
 			name: "server error skips group",
 			attempt: ExecutionAttempt{
 				DispatchState: execution.DispatchMaybeSent,

@@ -1685,6 +1685,57 @@ func TestHandlerBootstrapCapacityRetryRequestLogContract(t *testing.T) {
 	}
 }
 
+func TestHandlerAntigravityCapacityExhaustedFailoverRequestLogContract(t *testing.T) {
+	forwarder := &scriptedForwarder{streamResults: []UpstreamResult{
+		{
+			DispatchState: execution.DispatchMaybeSent, ResponseStarted: true,
+			StatusCode: http.StatusServiceUnavailable,
+			ExecutionError: &execution.ErrorEvidence{
+				Kind: execution.ErrorKindHTTP, OriginHint: execution.ErrorOriginUpstream,
+				ScopeHint: execution.ErrorScopeCredential, StatusCode: http.StatusServiceUnavailable,
+				Hint: execution.FailureHintRateLimited,
+				Type: "MODEL_CAPACITY_EXHAUSTED", Code: "MODEL_CAPACITY_EXHAUSTED",
+				Summary:      "Antigravity model capacity was exhausted",
+				ReplaySafety: execution.ReplaySafetyRejectedBeforeProcessing,
+			},
+		},
+		{
+			DispatchState: execution.DispatchMaybeSent, ResponseStarted: true,
+			StatusCode: http.StatusOK, Committed: true,
+			Stream: StreamObservation{EndReason: StreamEndCleanEOF},
+		},
+	}}
+	sink := &recordingRequestLogSink{}
+	engine, _, _, _ := newRequestLogHandlerTestRuntime(
+		t, forwarder, &recordingAccessKeyRPMLimiter{}, sink, "sk-first", "sk-second",
+	)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","stream":true}`),
+	)
+	request.Header.Set("Authorization", "Bearer gl-client")
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+
+	events := sink.snapshot()
+	if response.Code != http.StatusOK || len(events) != 1 || len(events[0].Attempts) != 2 {
+		t.Fatalf("response/events = %d/%#v", response.Code, events)
+	}
+	first := events[0].Attempts[0]
+	if first.FailureCategory != telemetry.FailureCategoryRateLimited ||
+		first.FailureOrigin != execution.ErrorOriginUpstream ||
+		first.FailureScope != execution.ErrorScopeCredential ||
+		first.RetryDirective != telemetry.RetryNextCandidate ||
+		first.Effect != telemetry.EffectCooldownCredential ||
+		first.RuleID != "rate_limit.credential.default_cooldown" ||
+		!first.WillRetry || first.Action != telemetry.ActionCooldownCredential ||
+		first.ErrorSummary != "Antigravity model capacity was exhausted" {
+		t.Fatalf("first attempt = %#v", first)
+	}
+}
+
 func TestHandlerRetryExhaustionUsesProviderErrorAttemptAndItsFrozenPrice(t *testing.T) {
 	firstTable := mustGatewayPriceTable(t, 2_000_000_000, true)
 	secondTable := mustGatewayPriceTable(t, 9_000_000_000, true)
