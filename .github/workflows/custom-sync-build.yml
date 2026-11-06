@@ -1,0 +1,131 @@
+name: Custom Sync and Build
+
+on:
+  schedule:
+    - cron: "0 19 * * *" # 03:00 CST (Asia/Shanghai), 1 hour before Watchtower at 04:00 CST
+  workflow_dispatch:
+  push:
+    branches:
+      - custom/grok-media
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: custom-sync-build
+  cancel-in-progress: false
+
+env:
+  GOPROXY: https://proxy.golang.org|direct
+  CUSTOM_BRANCH: custom/grok-media
+  IMAGE_REPO: ghcr.io/mianmian7/gpt-load
+
+jobs:
+  sync-test-and-publish:
+    name: Rebase onto latest upstream tag, smoke test, and push ARM64 image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout custom/grok-media
+        uses: actions/checkout@v4
+        with:
+          ref: custom/grok-media
+          fetch-depth: 0
+
+      - name: Fetch upstream tags and rebase if newer tag exists
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/tbphp/gpt-load.git || git remote set-url upstream https://github.com/tbphp/gpt-load.git
+          git fetch upstream --tags --force
+
+          current_base="$(git describe --tags --abbrev=0 --match 'v2.*')"
+          latest_tag="$(git tag -l 'v2.*' --sort=-v:refname | head -n 1)"
+
+          echo "Current base tag: ${current_base}"
+          echo "Latest upstream tag: ${latest_tag}"
+
+          rebased=false
+          if [[ -n "${latest_tag}" && "${latest_tag}" != "${current_base}" ]]; then
+            if ! git merge-base --is-ancestor "${latest_tag}" HEAD; then
+              echo "Rebasing local patches from ${current_base} onto ${latest_tag}..."
+              if ! git rebase --onto "${latest_tag}" "${current_base}"; then
+                git rebase --abort || true
+                echo "::error::Rebase onto ${latest_tag} conflicted with local patches. Existing ghcr.io image left untouched."
+                exit 1
+              fi
+              rebased=true
+              current_base="${latest_tag}"
+            fi
+          fi
+
+          echo "base_tag=${current_base}" >> "${GITHUB_OUTPUT}"
+          echo "rebased=${rebased}" >> "${GITHUB_OUTPUT}"
+          echo "head_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          echo "short_sha=$(git rev-parse --short=8 HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run unit tests on patched packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 ./internal/gateway/... ./internal/channel/... ./internal/execution/cpa/...
+          (cd third_party/cpaembedded && go test -count=1 ./embedded/...)
+
+      - name: Build and smoke-test Docker image
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_tag="${{ steps.sync.outputs.base_tag }}"
+          short_sha="${{ steps.sync.outputs.short_sha }}"
+          local_image="gpt-load:${base_tag}-grok-media-${short_sha}"
+
+          IMAGE="${local_image}" custom/build-image.sh
+          custom/smoke-test.sh "${local_image}"
+
+          echo "local_image=${local_image}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag and push verified images to GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          local_image="${{ steps.build.outputs.local_image }}"
+          base_tag="${{ steps.sync.outputs.base_tag }}"
+          short_sha="${{ steps.sync.outputs.short_sha }}"
+
+          tag_rolling="${IMAGE_REPO}:grok-media"
+          tag_version="${IMAGE_REPO}:${base_tag}-grok-media"
+          tag_exact="${IMAGE_REPO}:${base_tag}-grok-media-${short_sha}"
+
+          docker tag "${local_image}" "${tag_rolling}"
+          docker tag "${local_image}" "${tag_version}"
+          docker tag "${local_image}" "${tag_exact}"
+
+          docker push "${tag_rolling}"
+          docker push "${tag_version}"
+          docker push "${tag_exact}"
+
+      - name: Update custom/grok-media branch if rebased
+        if: steps.sync.outputs.rebased == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin "HEAD:refs/heads/${CUSTOM_BRANCH}"
