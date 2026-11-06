@@ -371,7 +371,9 @@ func NewCodexAuth(id string, credential CodexCredential, baseURL string) *clipro
 	if credential.LastRefresh != "" {
 		metadata["last_refresh"] = credential.LastRefresh
 	}
-	attributes := map[string]string{}
+	attributes := map[string]string{
+		cliproxyauth.AttributeConfigIndex: "0",
+	}
 	if trimmed := strings.TrimSpace(baseURL); trimmed != "" {
 		attributes["base_url"] = trimmed
 	}
@@ -395,7 +397,13 @@ func NewCodexHTTPExecutor() *CodexHTTPExecutor {
 	cfg := &internalconfig.Config{Codex: internalconfig.CodexConfig{
 		StreamBootstrapBuffering: true,
 		ModelLevelCooling:        true,
-	}}
+	}, CodexKey: []internalconfig.CodexKey{{
+		Models: []internalconfig.CodexModel{
+			{Name: "gpt-image-2.6"},
+			{Name: "gpt-image-2.6-flare"},
+			{Name: "gpt-image-2.6-sunburst"},
+		},
+	}}}
 	return &CodexHTTPExecutor{cfg: cfg, inner: internalexecutor.NewCodexExecutor(cfg)}
 }
 
@@ -590,6 +598,16 @@ func codexExecutionOptions(
 		options.Metadata = map[string]any{
 			cliproxyexecutor.RequestPathMetadataKey: request.RequestPath,
 		}
+	}
+	if strings.EqualFold(strings.TrimSpace(request.Format), "openai-image") &&
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(request.Model)), "gpt-image-") {
+		if options.Metadata == nil {
+			options.Metadata = make(map[string]any)
+		}
+		// CLIProxyAPI v8.0.51 only whitelists up to gpt-image-2.5 in codexIsDirectOpenAIImageModel.
+		// Setting RequestedModelMetadataKey to gpt-image-2.5 satisfies codexDirectOpenAIImageRouteModel,
+		// while directOpenAIImageModel preserves request.Model when matched in CodexKey.Models.
+		options.Metadata[cliproxyexecutor.RequestedModelMetadataKey] = "gpt-image-2.5"
 	}
 	return options
 }
