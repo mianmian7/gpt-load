@@ -31,6 +31,7 @@ const (
 	endpointLiveSideband
 	endpointLiveHangup
 	endpointMistralRealtime
+	endpointVideos
 )
 
 type route struct {
@@ -142,6 +143,12 @@ func dataPlaneEndpointCatalog() []dataPlaneEndpoint {
 		{name: "data.codex.live.realtime", methods: []string{http.MethodGet}, path: "/v1/realtime", resolve: staticRoute(protocol.CodexLive, endpointLiveSideband)},
 		{name: "data.codex.live.call.sideband", methods: []string{http.MethodGet}, path: "/v1/realtime/calls/:call_id", resolve: staticRoute(protocol.CodexLive, endpointLiveSideband)},
 		{name: "data.codex.live.hangup", methods: []string{http.MethodPost}, path: "/v1/realtime/calls/:call_id/hangup", resolve: staticRoute(protocol.CodexLive, endpointLiveHangup)},
+		{name: "data.xai.videos", methods: []string{http.MethodPost}, path: "/v1/videos", resolve: staticRoute(protocol.OpenAIResponses, endpointVideos)},
+		{name: "data.xai.videos.generations", methods: []string{http.MethodPost}, path: "/v1/videos/generations", resolve: staticRoute(protocol.OpenAIResponses, endpointVideos)},
+		{name: "data.xai.videos.edits", methods: []string{http.MethodPost}, path: "/v1/videos/edits", resolve: staticRoute(protocol.OpenAIResponses, endpointVideos)},
+		{name: "data.xai.videos.extensions", methods: []string{http.MethodPost}, path: "/v1/videos/extensions", resolve: staticRoute(protocol.OpenAIResponses, endpointVideos)},
+		{name: "data.xai.videos.retrieve", methods: []string{http.MethodGet}, path: "/v1/videos/:request_id", resolve: staticRoute(protocol.OpenAIResponses, endpointVideos)},
+		{name: "data.xai.videos.generations.retrieve", methods: []string{http.MethodGet}, path: "/v1/videos/generations/:request_id", resolve: staticRoute(protocol.OpenAIResponses, endpointVideos)},
 	}
 }
 

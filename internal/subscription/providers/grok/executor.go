@@ -12,6 +12,7 @@ type ExecuteRequest struct {
 	Model           string
 	Payload         []byte
 	Format          string
+	RequestPath     string
 	Headers         http.Header
 	OriginalRequest []byte
 	ContinuityKey   string
@@ -88,7 +89,7 @@ func (value *executor) ExecuteStream(ctx context.Context, credentialID string, c
 func requestToBridge(request ExecuteRequest) cpaembedded.ExecuteRequest {
 	return cpaembedded.ExecuteRequest{
 		AttemptID: request.AttemptID, Model: request.Model, Payload: append([]byte(nil), request.Payload...),
-		Format: request.Format, Headers: request.Headers.Clone(),
+		Format: request.Format, RequestPath: request.RequestPath, Headers: request.Headers.Clone(),
 		OriginalRequest: append([]byte(nil), request.OriginalRequest...), ContinuityKey: request.ContinuityKey,
 		BaseURL: request.BaseURL, ProxyURL: request.ProxyURL,
 	}

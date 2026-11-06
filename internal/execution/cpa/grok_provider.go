@@ -31,6 +31,17 @@ func newGrokProviderBridge() *grokProviderBridge {
 func (*grokProviderBridge) ProviderKind() channel.ProviderKind  { return channel.ProviderGrok }
 func (*grokProviderBridge) UpstreamProtocol() protocol.Protocol { return protocol.OpenAIResponses }
 
+func grokUpstreamProtocol(requestPath string) protocol.Protocol {
+	requestPath = strings.TrimSpace(requestPath)
+	switch {
+	case strings.HasSuffix(requestPath, "/images/generations"),
+		strings.HasSuffix(requestPath, "/images/edits"):
+		return protocol.OpenAIImages
+	default:
+		return ""
+	}
+}
+
 func (*grokProviderBridge) ValidateRouteCapability(route channel.RouteDescriptor) error {
 	valid := route.ClientProtocol == protocol.OpenAIResponses &&
 		(route.Operation == execution.OperationResponsesCreate ||
@@ -42,6 +53,11 @@ func (*grokProviderBridge) ValidateRouteCapability(route channel.RouteDescriptor
 	if route.ClientProtocol == protocol.Anthropic || route.ClientProtocol == protocol.Gemini {
 		valid = (route.Operation == execution.OperationChatCompletion || route.Operation == execution.OperationCountTokens) &&
 			route.RouteMode == execution.RouteConverted
+	}
+	if route.ClientProtocol == protocol.OpenAIImages {
+		valid = (route.Operation == execution.OperationImagesGenerate ||
+			route.Operation == execution.OperationImagesEdit) &&
+			route.RouteMode == execution.RouteNative
 	}
 	if !valid {
 		return fmt.Errorf("route is not implemented by Grok")
@@ -73,6 +89,7 @@ func (bridge *grokProviderBridge) Execute(
 		AppliedReasoningEffort:       response.AppliedReasoningEffort,
 		AppliedReasoningMode:         response.AppliedReasoningMode,
 		AppliedReasoningBudgetTokens: response.AppliedReasoningBudgetTokens,
+		UpstreamProtocol:             grokUpstreamProtocol(request.RequestPath),
 	}, err
 }
 
@@ -171,7 +188,8 @@ func grokRequest(request providerRequest, credentialID string) grok.ExecuteReque
 	return grok.ExecuteRequest{
 		AttemptID: request.AttemptID, Model: request.Model,
 		Payload: append([]byte(nil), request.Payload...), Format: request.Format,
-		Headers: request.Headers.Clone(), OriginalRequest: append([]byte(nil), request.OriginalRequest...),
+		RequestPath: request.RequestPath,
+		Headers:     request.Headers.Clone(), OriginalRequest: append([]byte(nil), request.OriginalRequest...),
 		ContinuityKey: grokContinuityScope(request.ContinuityKey, credentialID, request.Model, request.AttemptID),
 		BaseURL:       request.BaseURL, ProxyURL: request.ProxyURL,
 	}

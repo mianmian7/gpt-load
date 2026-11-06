@@ -458,6 +458,10 @@ func (handler *Handler) Handle(ginContext *gin.Context) {
 		handler.handleMistralRealtime(ginContext, requestContext)
 		return
 	}
+	if requestContext.selectedRoute.Kind == endpointVideos {
+		handler.handleVideos(ginContext, requestContext)
+		return
+	}
 	if websocketIntent(ginContext.Request) {
 		handler.handleWebsocket(ginContext, requestContext)
 		return

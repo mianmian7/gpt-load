@@ -47,6 +47,8 @@ func Grok() spec.Module {
 			spec.NewRoute(protocol.Anthropic, execution.OperationCountTokens, execution.RouteConverted),
 			spec.NewRoute(protocol.Gemini, execution.OperationChatCompletion, execution.RouteConverted),
 			spec.NewRoute(protocol.Gemini, execution.OperationCountTokens, execution.RouteConverted),
+			spec.NewRoute(protocol.OpenAIImages, execution.OperationImagesGenerate, execution.RouteNative),
+			spec.NewRoute(protocol.OpenAIImages, execution.OperationImagesEdit, execution.RouteNative),
 		},
 		Capabilities: spec.CapabilityBindings{
 			SubscriptionDriver: GrokSubscriptionDriver,

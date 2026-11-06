@@ -1,11 +1,17 @@
 package embedded
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +22,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -237,12 +244,27 @@ func grokExecutorOptions(request ExecuteRequest, format sdktranslator.Format, st
 	// Responses/Chat 把网关 UUID 写在请求体 prompt_cache_key 上，CPA 用它同时填 x-grok-conv-id。
 	// 不要放进 ExecutionSessionMetadataKey：那会被当成可信的 reasoning replay 会话，
 	// 下一轮把推理块插到用户输入前面，提示词缓存就只剩固定前缀。
-	if scope := strings.TrimSpace(request.ContinuityKey); scope != "" && !grokCarriesPromptCacheKey(string(format)) {
+	if scope := strings.TrimSpace(request.ContinuityKey); scope != "" && !grokCarriesPromptCacheKey(string(format)) && !grokIsMediaFormat(string(format)) {
 		options.Metadata = map[string]any{
 			cliproxyexecutor.ExecutionSessionMetadataKey: grokConversationID(scope),
 		}
 	}
+	if requestPath := strings.TrimSpace(request.RequestPath); requestPath != "" {
+		if options.Metadata == nil {
+			options.Metadata = make(map[string]any, 1)
+		}
+		options.Metadata[cliproxyexecutor.RequestPathMetadataKey] = requestPath
+	}
 	return options
+}
+
+func grokIsMediaFormat(format string) bool {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "openai-image", "openai-video":
+		return true
+	default:
+		return false
+	}
 }
 
 func grokConversationID(scope string) string {
@@ -257,8 +279,281 @@ func grokConversationID(scope string) string {
 // cli-chat-proxy 只按 prompt_cache_key 复用提示词缓存，不认 x-grok-conv-id。
 func scopeGrokExecutionRequest(request ExecuteRequest, baseURL string) ExecuteRequest {
 	request = prepareGrokExecutionRequest(request)
+	if strings.EqualFold(strings.TrimSpace(request.Format), "openai-image") {
+		request = normalizeGrokImageExecutionRequest(request)
+	}
 	request.ContinuityKey = targetContinuityScope(request.ContinuityKey, baseURL)
 	return applyGrokPromptCacheKey(request)
+}
+
+func normalizeGrokImageExecutionRequest(request ExecuteRequest) ExecuteRequest {
+	contentType := ""
+	if request.Headers != nil {
+		contentType = request.Headers.Get("Content-Type")
+	}
+	mediaType, params, _ := mime.ParseMediaType(contentType)
+	if strings.EqualFold(mediaType, "multipart/form-data") {
+		if converted, err := convertGrokMultipartImageToJSON(request.Payload, params["boundary"], request.Model); err == nil {
+			request.Payload = converted
+			request.OriginalRequest = append([]byte(nil), converted...)
+			if request.Headers == nil {
+				request.Headers = make(http.Header)
+			} else {
+				request.Headers = request.Headers.Clone()
+			}
+			request.Headers.Set("Content-Type", "application/json")
+			request.RequestPath = "/v1/images/edits"
+			return request
+		}
+	}
+	if !gjson.ValidBytes(request.Payload) {
+		return request
+	}
+	rawJSON := request.Payload
+	model := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if model == "" {
+		model = strings.TrimSpace(request.Model)
+	}
+	if model == "" {
+		model = "grok-imagine-image"
+	}
+	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
+	rawResponseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
+	responseFormat := "b64_json"
+	if strings.EqualFold(rawResponseFormat, "url") {
+		responseFormat = "url"
+	}
+	size := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String())
+	aspectRatio := grokImageAspectRatio(gjson.GetBytes(rawJSON, "aspect_ratio").String(), "")
+	aspectRatio = grokImageAspectRatioFromSize(size, aspectRatio)
+	images := collectGrokImagesFromJSON(rawJSON)
+	isEdit := strings.HasSuffix(strings.TrimSpace(request.RequestPath), "/images/edits") || len(images) > 0
+	if !isEdit && aspectRatio == "" {
+		aspectRatio = "1:1"
+	}
+	defaultRes := ""
+	if !isEdit {
+		defaultRes = "1k"
+	}
+	resolution := grokImageResolution(gjson.GetBytes(rawJSON, "resolution").String(), size, defaultRes)
+	quality := strings.TrimSpace(gjson.GetBytes(rawJSON, "quality").String())
+	n := int64(0)
+	if v := gjson.GetBytes(rawJSON, "n"); v.Exists() && v.Type == gjson.Number {
+		n = v.Int()
+	}
+
+	built := buildGrokImageJSONPayload(model, prompt, responseFormat, aspectRatio, resolution, quality, n, images)
+	origBuilt := buildGrokImageJSONPayload(model, prompt, rawResponseFormat, aspectRatio, resolution, quality, n, images)
+	request.Payload = built
+	request.OriginalRequest = origBuilt
+	if isEdit {
+		request.RequestPath = "/v1/images/edits"
+	} else if strings.TrimSpace(request.RequestPath) == "" {
+		request.RequestPath = "/v1/images/generations"
+	}
+	return request
+}
+
+func convertGrokMultipartImageToJSON(body []byte, boundary string, fallbackModel string) ([]byte, error) {
+	if strings.TrimSpace(boundary) == "" {
+		return nil, errors.New("missing multipart boundary")
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	form, err := reader.ReadForm(64 << 20)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = form.RemoveAll() }()
+
+	firstVal := func(key string) string {
+		if vals := form.Value[key]; len(vals) > 0 {
+			return strings.TrimSpace(vals[0])
+		}
+		return ""
+	}
+	model := firstVal("model")
+	if model == "" {
+		model = strings.TrimSpace(fallbackModel)
+	}
+	if model == "" {
+		model = "grok-imagine-image"
+	}
+	prompt := firstVal("prompt")
+	rawResponseFormat := firstVal("response_format")
+	responseFormat := "b64_json"
+	if strings.EqualFold(rawResponseFormat, "url") {
+		responseFormat = "url"
+	}
+	size := firstVal("size")
+	aspectRatio := grokImageAspectRatio(firstVal("aspect_ratio"), "")
+	aspectRatio = grokImageAspectRatioFromSize(size, aspectRatio)
+	resolution := grokImageResolution(firstVal("resolution"), size, "")
+	quality := firstVal("quality")
+	n := int64(0)
+	if nStr := firstVal("n"); nStr != "" {
+		if parsed, errParse := strconv.ParseInt(nStr, 10, 64); errParse == nil {
+			n = parsed
+		}
+	}
+	var fileHeaders []*multipart.FileHeader
+	if files := form.File["image[]"]; len(files) > 0 {
+		fileHeaders = files
+	} else if files := form.File["image"]; len(files) > 0 {
+		fileHeaders = files
+	}
+	var images []string
+	for _, fh := range fileHeaders {
+		if fh == nil {
+			continue
+		}
+		f, errOpen := fh.Open()
+		if errOpen != nil {
+			continue
+		}
+		data, errRead := io.ReadAll(f)
+		_ = f.Close()
+		if errRead != nil || len(data) == 0 {
+			continue
+		}
+		mt := strings.TrimSpace(fh.Header.Get("Content-Type"))
+		if mt == "" || mt == "application/octet-stream" {
+			mt = http.DetectContentType(data)
+		}
+		images = append(images, "data:"+mt+";base64,"+base64.StdEncoding.EncodeToString(data))
+	}
+	return buildGrokImageJSONPayload(model, prompt, responseFormat, aspectRatio, resolution, quality, n, images), nil
+}
+
+func buildGrokImageJSONPayload(model, prompt, responseFormat, aspectRatio, resolution, quality string, n int64, images []string) []byte {
+	req := []byte(`{}`)
+	req, _ = sjson.SetBytes(req, "model", strings.TrimSpace(model))
+	req, _ = sjson.SetBytes(req, "prompt", strings.TrimSpace(prompt))
+	if rf := strings.TrimSpace(responseFormat); rf != "" {
+		if strings.EqualFold(rf, "url") {
+			req, _ = sjson.SetBytes(req, "response_format", "url")
+		} else {
+			req, _ = sjson.SetBytes(req, "response_format", "b64_json")
+		}
+	}
+	if aspectRatio != "" {
+		req, _ = sjson.SetBytes(req, "aspect_ratio", aspectRatio)
+	}
+	if resolution != "" {
+		req, _ = sjson.SetBytes(req, "resolution", resolution)
+	}
+	if q := strings.TrimSpace(quality); q != "" {
+		req, _ = sjson.SetBytes(req, "quality", q)
+	}
+	if n > 0 {
+		req, _ = sjson.SetBytes(req, "n", n)
+	}
+	if len(images) == 1 {
+		ref := []byte(`{"type":"image_url","url":""}`)
+		ref, _ = sjson.SetBytes(ref, "url", images[0])
+		req, _ = sjson.SetRawBytes(req, "image", ref)
+	} else if len(images) > 1 {
+		for _, img := range images {
+			ref := []byte(`{"type":"image_url","url":""}`)
+			ref, _ = sjson.SetBytes(ref, "url", img)
+			req, _ = sjson.SetRawBytes(req, "images.-1", ref)
+		}
+	}
+	return req
+}
+
+func collectGrokImagesFromJSON(rawJSON []byte) []string {
+	var images []string
+	appendImage := func(url string) {
+		url = strings.TrimSpace(url)
+		if url != "" {
+			images = append(images, url)
+		}
+	}
+	for _, field := range []string{"image", "image2", "image3"} {
+		if img := gjson.GetBytes(rawJSON, field); img.Exists() {
+			if img.Type == gjson.String {
+				appendImage(img.String())
+			} else if img.Type == gjson.JSON {
+				appendImage(img.Get("image_url.url").String())
+				if imageURL := img.Get("image_url"); imageURL.Type == gjson.String {
+					appendImage(imageURL.String())
+				}
+				appendImage(img.Get("url").String())
+			}
+		}
+	}
+	if imagesResult := gjson.GetBytes(rawJSON, "images"); imagesResult.IsArray() {
+		for _, img := range imagesResult.Array() {
+			if img.Type == gjson.String {
+				appendImage(img.String())
+				continue
+			}
+			appendImage(img.Get("image_url.url").String())
+			if imageURL := img.Get("image_url"); imageURL.Type == gjson.String {
+				appendImage(imageURL.String())
+			}
+			appendImage(img.Get("url").String())
+		}
+	}
+	return images
+}
+
+func grokImageAspectRatio(raw string, fallback string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1:1", "square":
+		return "1:1"
+	case "16:9", "landscape":
+		return "16:9"
+	case "9:16", "portrait":
+		return "9:16"
+	case "9:20":
+		return "9:20"
+	case "20:9":
+		return "20:9"
+	case "4:3":
+		return "4:3"
+	case "3:4":
+		return "3:4"
+	case "3:2":
+		return "3:2"
+	case "2:3":
+		return "2:3"
+	default:
+		return fallback
+	}
+}
+
+func grokImageAspectRatioFromSize(size string, fallback string) string {
+	size = strings.ToLower(strings.TrimSpace(size))
+	switch size {
+	case "1024x1024", "2048x2048", "1:1":
+		return "1:1"
+	case "1792x1024", "16:9":
+		return "16:9"
+	case "1024x1792", "9:16":
+		return "9:16"
+	case "9:20":
+		return "9:20"
+	case "20:9":
+		return "20:9"
+	case "1536x1024", "3:2":
+		return "3:2"
+	case "1024x1536", "2:3":
+		return "2:3"
+	default:
+		return fallback
+	}
+}
+
+func grokImageResolution(raw string, size string, fallback string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1k", "2k":
+		return strings.ToLower(strings.TrimSpace(raw))
+	}
+	if strings.Contains(strings.ToLower(strings.TrimSpace(size)), "2048") {
+		return "2k"
+	}
+	return fallback
 }
 
 func applyGrokPromptCacheKey(request ExecuteRequest) ExecuteRequest {
@@ -382,8 +677,15 @@ func boundedGrokExecutionCode(raw []byte) string {
 }
 
 func grokExecutionSummary(status int, code string) string {
-	if strings.Contains(strings.ToLower(code), "free-usage-exhausted") {
+	lower := strings.ToLower(code)
+	if strings.Contains(lower, "free-usage-exhausted") {
 		return "Grok included free usage is exhausted."
+	}
+	if strings.Contains(lower, "content-moderated") || strings.Contains(lower, "moderation") {
+		return "Generated video rejected by content moderation (" + code + ")."
+	}
+	if code != "" {
+		return fmt.Sprintf("Grok upstream returned status %d (%s)", status, code)
 	}
 	return fmt.Sprintf("Grok upstream returned status %d", status)
 }

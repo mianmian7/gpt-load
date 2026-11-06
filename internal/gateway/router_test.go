@@ -105,6 +105,12 @@ func TestDataPlaneEndpointCatalogDeclaresCompleteHTTPRoutes(t *testing.T) {
 		{name: "data.codex.live.realtime", methods: []string{http.MethodGet}, path: "/v1/realtime"},
 		{name: "data.codex.live.call.sideband", methods: []string{http.MethodGet}, path: "/v1/realtime/calls/:call_id"},
 		{name: "data.codex.live.hangup", methods: []string{http.MethodPost}, path: "/v1/realtime/calls/:call_id/hangup"},
+		{name: "data.xai.videos", methods: []string{http.MethodPost}, path: "/v1/videos"},
+		{name: "data.xai.videos.generations", methods: []string{http.MethodPost}, path: "/v1/videos/generations"},
+		{name: "data.xai.videos.edits", methods: []string{http.MethodPost}, path: "/v1/videos/edits"},
+		{name: "data.xai.videos.extensions", methods: []string{http.MethodPost}, path: "/v1/videos/extensions"},
+		{name: "data.xai.videos.retrieve", methods: []string{http.MethodGet}, path: "/v1/videos/:request_id"},
+		{name: "data.xai.videos.generations.retrieve", methods: []string{http.MethodGet}, path: "/v1/videos/generations/:request_id"},
 	}
 
 	catalog := dataPlaneEndpointCatalog()
