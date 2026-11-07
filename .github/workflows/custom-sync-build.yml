@@ -2,7 +2,9 @@ name: Custom Sync and Build
 
 on:
   schedule:
-    - cron: "0 19 * * *" # 03:00 CST (Asia/Shanghai), 1 hour before Watchtower at 04:00 CST
+    # 01:00 CST (Asia/Shanghai). GitHub often starts scheduled runs hours late; this leaves
+    # room before Watchtower pulls at 04:00 CST.
+    - cron: "0 17 * * *"
   workflow_dispatch:
   push:
     branches:
@@ -45,7 +47,8 @@ jobs:
           git fetch upstream --tags --force
 
           current_base="$(git describe --tags --abbrev=0 --match 'v2.*')"
-          latest_tag="$(git tag -l 'v2.*' --sort=-v:refname | head -n 1)"
+          # versionsort.suffix=- ranks v2.0.0 above v2.0.0-rc.N (plain v:refname does not).
+          latest_tag="$(git -c versionsort.suffix=- tag -l 'v2.*' --sort=-v:refname | head -n 1)"
 
           echo "Current base tag: ${current_base}"
           echo "Latest upstream tag: ${latest_tag}"
@@ -67,15 +70,41 @@ jobs:
           echo "base_tag=${current_base}" >> "${GITHUB_OUTPUT}"
           echo "rebased=${rebased}" >> "${GITHUB_OUTPUT}"
           echo "head_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
-          echo "short_sha=$(git rev-parse --short=8 HEAD)" >> "${GITHUB_OUTPUT}"
+          # Image identity = last commit that changed the source (workflow-only commits do not count),
+          # so an unchanged tree maps to an existing tag and is not rebuilt.
+          echo "short_sha=$(git log -1 --format=%h --abbrev=8 -- . ':(exclude).github')" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip when this source is already published
+        id: published
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_exact="${IMAGE_REPO}:${{ steps.sync.outputs.base_tag }}-grok-media-${{ steps.sync.outputs.short_sha }}"
+          # Rebuilding the same source yields a new digest, and Watchtower would then restart
+          # production every day for nothing. Publish only images that do not exist yet.
+          if docker manifest inspect "${tag_exact}" >/dev/null 2>&1; then
+            echo "${tag_exact} already published; nothing to do."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Set up Go
+        if: steps.published.outputs.skip != 'true'
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: false
 
       - name: Run unit tests on patched packages
+        if: steps.published.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -83,6 +112,7 @@ jobs:
           (cd third_party/cpaembedded && go test -count=1 ./embedded/...)
 
       - name: Build and smoke-test Docker image
+        if: steps.published.outputs.skip != 'true'
         id: build
         shell: bash
         run: |
@@ -96,14 +126,8 @@ jobs:
 
           echo "local_image=${local_image}" >> "${GITHUB_OUTPUT}"
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Tag and push verified images to GHCR
+        if: steps.published.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
